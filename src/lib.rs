@@ -2,9 +2,129 @@ use git2::{Commit, Repository};
 use std::error::Error;
 use std::fmt::Display;
 
+const MAJOR_TAGS: [&str; 1] = [":boom:"];
+const MINOR_TAGS: [&str; 9] = [
+    ":sparkles:",
+    ":children_crossing:",
+    ":lipstick:",
+    ":iphone:",
+    ":egg:",
+    ":chart_with_upwards_trend:",
+    ":heavy_plus_sign:",
+    ":heavy_minus_sign:",
+    ":passport_control:",
+];
+const PATCH_TAGS: [&str; 42] = [
+    ":art:",
+    ":ambulance:",
+    ":lock:",
+    ":bug:",
+    ":zap:",
+    ":goal_net:",
+    ":alien:",
+    ":wheelchair:",
+    ":speech_balloon:",
+    ":mag:",
+    ":fire:",
+    ":white_check_mark:",
+    ":closed_lock_with_key:",
+    ":rotating_light:",
+    ":green_heart:",
+    ":arrow_down:",
+    ":arrow_up:",
+    ":pushpin:",
+    ":construction_worker:",
+    ":recycle:",
+    ":wrench:",
+    ":hammer:",
+    ":globe_with_meridians:",
+    ":package:",
+    ":truck:",
+    ":bento:",
+    ":card_file_box:",
+    ":loud_sound:",
+    ":mute:",
+    ":building_construction:",
+    ":camera_flash:",
+    ":label:",
+    ":seedling:",
+    ":triangular_flag_on_post:",
+    ":dizzy:",
+    ":adhesive_bandage:",
+    ":monocle_face:",
+    ":necktie:",
+    ":stethoscope:",
+    ":technologist:",
+    ":thread:",
+    ":safety_vest:",
+];
+const OTHER_TAGS: [&str; 21] = [
+    ":memo:",
+    ":rocket:",
+    ":tada:",
+    ":bookmark:",
+    ":construction:",
+    ":pencil2:",
+    ":poop:",
+    ":rewind:",
+    ":twisted_rightwards_arrows:",
+    ":page_facing_up:",
+    ":bulb:",
+    ":beers:",
+    ":bust_in_silhouette:",
+    ":clown_face:",
+    ":see_no_evil:",
+    ":alembic:",
+    ":wastebasket:",
+    ":coffin:",
+    ":test_tube:",
+    ":bricks:",
+    ":money_with_wings:",
+];
+
+/// Check whether a commit message starts with a known Gitmoji code, per the
+/// [Gitmoji specification](https://gitmoji.dev/specification).
+fn is_gitmoji_commit_message(message: &str) -> bool {
+    MAJOR_TAGS
+        .iter()
+        .chain(MINOR_TAGS.iter())
+        .chain(PATCH_TAGS.iter())
+        .chain(OTHER_TAGS.iter())
+        .any(|tag| message.trim_start().starts_with(tag))
+}
+
+/// Error returned when a git commit message does not follow the
+/// [Gitmoji specification](https://gitmoji.dev/specification).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NonConventionalCommit {
+    message: String,
+}
+
+impl Display for NonConventionalCommit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl Error for NonConventionalCommit {}
+
+impl NonConventionalCommit {
+    /// Same message as [`Display`](Self), but the offending commit message is cut off at
+    /// the first line. The result always ends with a single trailing newline.
+    pub fn truncated(&self) -> String {
+        let first_line = self.message.lines().next().unwrap_or(&self.message);
+        format!("{}\n", first_line)
+    }
+}
+
 /// Get the commit messages from a given git repository.
+///
+/// Commits whose message does not follow the
+/// [Gitmoji specification](https://gitmoji.dev/specification) are discarded rather than
+/// causing an error; they are returned separately so the caller can warn about them.
 /// ## Returns
-/// A vector containing the commits or an error type when an error occurs.
+/// A tuple of the valid commits and the discarded, non-conventional commits, or an error
+/// type when the repository itself could not be read.
 /// ## Examples
 /// ```
 ///  use std::env;
@@ -13,17 +133,23 @@ use std::fmt::Display;
 ///
 ///  let git_repo = Repository::open(".").unwrap();
 ///
-///  let commits = get_commits(&git_repo).unwrap_or_else(|error| {
+///  let (commits, discarded) = get_commits(&git_repo).unwrap_or_else(|error| {
 ///     eprintln!("{}", error);
-///     Vec::new()
+///     (Vec::new(), Vec::new())
 ///  });
+///
+///  for warning in &discarded {
+///     eprintln!("{}", warning);
+///  }
 ///
 ///  println!("Commits in the directory:");
 ///  for commit in commits {
 ///     println!("\t{}", commit.message().trim_end());
 ///  }
 /// ```
-pub fn get_commits(repository: &Repository) -> Result<Vec<ConventionalCommit>, Box<dyn Error>> {
+pub fn get_commits(
+    repository: &Repository,
+) -> Result<(Vec<ConventionalCommit>, Vec<NonConventionalCommit>), Box<dyn Error>> {
     let mut revwalk = repository.revwalk()?;
     revwalk.push_head()?;
 
@@ -32,13 +158,19 @@ pub fn get_commits(repository: &Repository) -> Result<Vec<ConventionalCommit>, B
         .filter_map(|valid_object_id| repository.find_commit(valid_object_id).ok())
         .collect();
 
-    Ok(commits_in_repo
-        .into_iter()
-        .map(|commit| ConventionalCommit::from_git2_commit(commit))
-        .collect())
+    let mut conventional_commits = Vec::new();
+    let mut non_conventional_commits = Vec::new();
+    for commit in commits_in_repo {
+        match ConventionalCommit::from_git2_commit(commit) {
+            Ok(conventional_commit) => conventional_commits.push(conventional_commit),
+            Err(non_conventional_commit) => non_conventional_commits.push(non_conventional_commit),
+        }
+    }
+
+    Ok((conventional_commits, non_conventional_commits))
 }
 
-/// A structure to represent a git commit.
+/// A structure to represent a conventional git commit.
 ///
 /// Can be created with [`from_git2_commit`] method
 ///
@@ -52,7 +184,7 @@ pub fn get_commits(repository: &Repository) -> Result<Vec<ConventionalCommit>, B
 ///  let commit_oid = repo.head().unwrap().target().unwrap();
 ///  let git2_commit = repo.find_commit(commit_oid).unwrap();
 ///
-///  let commit = ConventionalCommit::from_git2_commit(git2_commit);
+///  let commit = ConventionalCommit::from_git2_commit(git2_commit).unwrap();
 ///
 /// ```
 #[derive(Clone, Debug, PartialEq)]
@@ -63,13 +195,18 @@ pub struct ConventionalCommit {
 impl ConventionalCommit {
     /// Create [`Commit`] from [`git2::Commit`] object.
     ///
+    /// ## Returns
+    /// An error when the commit message does not follow the
+    /// [Gitmoji specification](https://gitmoji.dev/specification).
+    ///
     /// [`Commit`]: ConventionalCommit
     /// ['git2::Commit`]: git2::Commit
-    pub fn from_git2_commit(commit: git2::Commit) -> Self {
-        // TODO(kk): return error type when the git2 commit message is not conventional
-        Self {
-            message: commit.message().unwrap().to_string(),
+    pub fn from_git2_commit(commit: git2::Commit) -> Result<Self, NonConventionalCommit> {
+        let message = commit.message().unwrap().to_string();
+        if !is_gitmoji_commit_message(&message) {
+            return Err(NonConventionalCommit { message });
         }
+        Ok(Self { message })
     }
 
     /// Return a reference to the `message` attribute
@@ -95,10 +232,12 @@ pub struct Changes {
     patch: Vec<ConventionalCommit>,
     /// Vector of commits with other changes
     other: Vec<ConventionalCommit>,
+    /// Vector of unconventional commits
+    non_conventional: Vec<NonConventionalCommit>,
 }
 
 impl Changes {
-    /// Sort the commits into `major`, `minor`, `patch` and `other` change categories
+    /// Sort the commits into `major`, `minor`, `patch`, `other` and `invalid` change categories
     /// according to their commit flags.
     ///
     /// ## Returns
@@ -111,96 +250,20 @@ impl Changes {
     /// use cargo_semantic_release::{get_commits , Changes};
     ///
     /// let git_repo = Repository::open(".").unwrap();
-    /// let commits = get_commits(&git_repo).unwrap();
+    /// let (commits, discarded) = get_commits(&git_repo).unwrap_or_default();
     ///
-    /// let changes = Changes::sort_commits(commits);
+    /// let changes = Changes::sort_commits(commits, discarded);
     /// ```
-    pub fn sort_commits(unsorted_commits: Vec<ConventionalCommit>) -> Self {
-        let major_tags = [":boom:"];
-        let minor_tags = [
-            ":sparkles:",
-            ":children_crossing:",
-            ":lipstick:",
-            ":iphone:",
-            ":egg:",
-            ":chart_with_upwards_trend:",
-            ":heavy_plus_sign:",
-            ":heavy_minus_sign:",
-            ":passport_control:",
-        ];
-        let patch_tags = [
-            ":art:",
-            ":ambulance:",
-            ":lock:",
-            ":bug:",
-            ":zap:",
-            ":goal_net:",
-            ":alien:",
-            ":wheelchair:",
-            ":speech_balloon:",
-            ":mag:",
-            ":fire:",
-            ":white_check_mark:",
-            ":closed_lock_with_key:",
-            ":rotating_light:",
-            ":green_heart:",
-            ":arrow_down:",
-            ":arrow_up:",
-            ":pushpin:",
-            ":construction_worker:",
-            ":recycle:",
-            ":wrench:",
-            ":hammer:",
-            ":globe_with_meridians:",
-            ":package:",
-            ":truck:",
-            ":bento:",
-            ":card_file_box:",
-            ":loud_sound:",
-            ":mute:",
-            ":building_construction:",
-            ":camera_flash:",
-            ":label:",
-            ":seedling:",
-            ":triangular_flag_on_post:",
-            ":dizzy:",
-            ":adhesive_bandage:",
-            ":monocle_face:",
-            ":necktie:",
-            ":stethoscope:",
-            ":technologist:",
-            ":thread:",
-            ":safety_vest:",
-        ];
-        let other_tags = [
-            ":memo:",
-            ":rocket:",
-            ":tada:",
-            ":bookmark:",
-            ":construction:",
-            ":pencil2:",
-            ":poop:",
-            ":rewind:",
-            ":twisted_rightwards_arrows:",
-            ":page_facing_up:",
-            ":bulb:",
-            ":beers:",
-            ":bust_in_silhouette:",
-            ":clown_face:",
-            ":see_no_evil:",
-            ":alembic:",
-            ":wastebasket:",
-            ":coffin:",
-            ":test_tube:",
-            ":bricks:",
-            ":money_with_wings:",
-        ];
-
+    pub fn sort_commits(
+        unsorted_commits: Vec<ConventionalCommit>,
+        non_conventional: Vec<NonConventionalCommit>,
+    ) -> Self {
         Self {
-            major: get_commits_with_tag(unsorted_commits.clone(), major_tags.to_vec()),
-            minor: get_commits_with_tag(unsorted_commits.clone(), minor_tags.to_vec()),
-            patch: get_commits_with_tag(unsorted_commits.clone(), patch_tags.to_vec()),
-            other: get_commits_with_tag(unsorted_commits, other_tags.to_vec()),
+            major: get_commits_with_tag(unsorted_commits.clone(), MAJOR_TAGS.to_vec()),
+            minor: get_commits_with_tag(unsorted_commits.clone(), MINOR_TAGS.to_vec()),
+            patch: get_commits_with_tag(unsorted_commits.clone(), PATCH_TAGS.to_vec()),
+            other: get_commits_with_tag(unsorted_commits, OTHER_TAGS.to_vec()),
+            non_conventional,
         }
     }
 }
@@ -211,13 +274,16 @@ impl Display for Changes {
         let minor_changes = convert_to_string_vector(self.minor.clone());
         let patch_changes = convert_to_string_vector(self.patch.clone());
         let other_changes = convert_to_string_vector(self.other.clone());
+        let non_conventional_changes =
+            convert_errors_to_string_vector(self.non_conventional.clone());
         write!(
             f,
-            "major:\n\t{}\nminor:\n\t{}\npatch:\n\t{}\nother:\n\t{}",
+            "major:\n\t{}\nminor:\n\t{}\npatch:\n\t{}\nother:\n\t{}\ninvalid:\n\t{}",
             major_changes.join("\t"),
             minor_changes.join("\t"),
             patch_changes.join("\t"),
-            other_changes.join("\t")
+            other_changes.join("\t"),
+            non_conventional_changes.join("\t")
         )
     }
 }
@@ -226,6 +292,13 @@ fn convert_to_string_vector(commits: Vec<ConventionalCommit>) -> Vec<String> {
     commits
         .into_iter()
         .map(|commit| commit.message().to_string())
+        .collect::<Vec<String>>()
+}
+
+fn convert_errors_to_string_vector(errors: Vec<NonConventionalCommit>) -> Vec<String> {
+    errors
+        .into_iter()
+        .map(|error| error.truncated())
         .collect::<Vec<String>>()
 }
 
@@ -273,8 +346,8 @@ impl Display for SemanticVersion {
 ///  use cargo_semantic_release::{evaluate_changes, get_commits, Changes};
 ///
 ///  let git_repo = Repository::open(".").unwrap();
-///  let commits = get_commits(&git_repo).unwrap();
-///  let changes = Changes::sort_commits(commits);
+///  let (commits, discarded) = get_commits(&git_repo).unwrap_or_default();
+///  let changes = Changes::sort_commits(commits, discarded);
 ///
 ///  let action = evaluate_changes(changes);
 ///  println!("suggested change of semantic version: {}", action);
@@ -364,16 +437,21 @@ mod get_commits_functionality {
     fn getting_commits_from_repo_with_one_commit() {
         // Given
         let (_temp_dir, repository) = repo_init();
-        let repository = add_commit(repository, "initial_commit".to_string());
+        let repository = add_commit(repository, ":tada: initial_commit".to_string());
         // When
-        let result = get_commits(&repository).unwrap();
+        let (commits, discarded) = get_commits(&repository).unwrap();
         // Then
-        let expected_commit_messages = vec!["initial_commit"];
+        let expected_commit_messages = vec![":tada: initial_commit"];
         assert!(
-            compare(&result, &expected_commit_messages),
+            compare(&commits, &expected_commit_messages),
             "result = {:?}\nexpected result = {:?}",
-            result,
+            commits,
             expected_commit_messages
+        );
+        assert!(
+            discarded.is_empty(),
+            "expected no discarded commits, got {:?}",
+            discarded
         )
     }
 
@@ -381,18 +459,23 @@ mod get_commits_functionality {
     fn getting_commits_from_repo_with_multiple_commits() {
         // Given
         let (_temp_dir, mut repository) = repo_init();
-        let commit_messages = vec!["commit 1", "commit 2", "commit 3"];
+        let commit_messages = vec![":sparkles: commit 1", ":bug: commit 2", ":memo: commit 3"];
         for commit_message in &commit_messages {
             repository = add_commit(repository, commit_message.to_string());
         }
         // When
-        let result = get_commits(&repository).unwrap();
+        let (commits, discarded) = get_commits(&repository).unwrap();
         // Then
         assert!(
-            compare(&result, &commit_messages),
+            compare(&commits, &commit_messages),
             "result = {:?}\ncommit_messages = {:?}",
-            result,
+            commits,
             commit_messages
+        );
+        assert!(
+            discarded.is_empty(),
+            "expected no discarded commits, got {:?}",
+            discarded
         )
     }
 
@@ -405,12 +488,58 @@ mod get_commits_functionality {
         // Then
         assert!(result.is_err(), "Expected and error, but got Ok")
     }
+
+    #[test]
+    fn getting_commits_from_repo_with_a_non_conventional_commit() {
+        // Given
+        let (_temp_dir, repository) = repo_init();
+        let repository = add_commit(repository, "initial_commit".to_string());
+        // When
+        let (commits, discarded) = get_commits(&repository).unwrap();
+        // Then
+        assert!(
+            commits.is_empty(),
+            "expected no valid commits, got {:?}",
+            commits
+        );
+        assert_eq!(discarded.len(), 1, "expected one discarded commit");
+        assert!(
+            discarded[0].to_string().contains("initial_commit"),
+            "expected discarded error to mention the offending message, got: {}",
+            discarded[0]
+        );
+    }
+
+    #[test]
+    fn getting_commits_from_repo_with_conventional_and_non_conventional_commits() {
+        // Given
+        let (_temp_dir, mut repository) = repo_init();
+        repository = add_commit(repository, "initial_commit".to_string());
+        repository = add_commit(repository, ":sparkles: add a feature".to_string());
+        // When
+        let (commits, discarded) = get_commits(&repository).unwrap();
+        // Then
+        let expected_commit_messages = vec![":sparkles: add a feature"];
+        assert!(
+            compare(&commits, &expected_commit_messages),
+            "result = {:?}\nexpected result = {:?}",
+            commits,
+            expected_commit_messages
+        );
+        assert_eq!(discarded.len(), 1, "expected one discarded commit");
+        assert!(
+            discarded[0].to_string().contains("initial_commit"),
+            "expected discarded error to mention the offending message, got: {}",
+            discarded[0]
+        );
+    }
 }
 
 #[cfg(test)]
 mod changes_struct {
     use crate::Changes;
     use crate::ConventionalCommit;
+    use crate::NonConventionalCommit;
 
     #[test]
     fn creating_from_empty_commit_list() {
@@ -418,7 +547,7 @@ mod changes_struct {
         let commits = Vec::<ConventionalCommit>::new();
 
         // When
-        let result = Changes::sort_commits(commits);
+        let result = Changes::sort_commits(commits, Vec::new());
 
         // Then
         let expected_result = Changes {
@@ -426,6 +555,7 @@ mod changes_struct {
             minor: Vec::new(),
             patch: Vec::new(),
             other: Vec::new(),
+            non_conventional: Vec::new(),
         };
         assert_eq!(result, expected_result);
     }
@@ -438,7 +568,7 @@ mod changes_struct {
         }];
 
         // When
-        let result = Changes::sort_commits(commits.clone());
+        let result = Changes::sort_commits(commits.clone(), Vec::new());
 
         // Then
         let expected_result = Changes {
@@ -446,6 +576,7 @@ mod changes_struct {
             minor: Vec::new(),
             patch: Vec::new(),
             other: Vec::new(),
+            non_conventional: Vec::new(),
         };
         assert_eq!(result, expected_result);
     }
@@ -485,7 +616,7 @@ mod changes_struct {
         ];
 
         // When
-        let result = Changes::sort_commits(commits.clone());
+        let result = Changes::sort_commits(commits.clone(), Vec::new());
 
         // Then
         let expected_result = Changes {
@@ -493,6 +624,7 @@ mod changes_struct {
             minor: commits,
             patch: Vec::new(),
             other: Vec::new(),
+            non_conventional: Vec::new(),
         };
         assert_eq!(result, expected_result);
     }
@@ -632,7 +764,7 @@ mod changes_struct {
         ];
 
         // When
-        let result = Changes::sort_commits(commits.clone());
+        let result = Changes::sort_commits(commits.clone(), Vec::new());
 
         // Then
         let expected_result = Changes {
@@ -640,6 +772,7 @@ mod changes_struct {
             minor: Vec::new(),
             patch: commits,
             other: Vec::new(),
+            non_conventional: Vec::new(),
         };
         assert_eq!(result, expected_result);
     }
@@ -714,7 +847,7 @@ mod changes_struct {
         ];
 
         // When
-        let result = Changes::sort_commits(commits.clone());
+        let result = Changes::sort_commits(commits.clone(), Vec::new());
 
         // Then
         let expected_result = Changes {
@@ -722,8 +855,66 @@ mod changes_struct {
             minor: Vec::new(),
             patch: Vec::new(),
             other: commits,
+            non_conventional: Vec::new(),
         };
         assert_eq!(result, expected_result);
+    }
+
+    #[test]
+    fn creating_with_invalid_commits() {
+        // Given
+        let commits = Vec::<ConventionalCommit>::new();
+        let invalid = vec![NonConventionalCommit {
+            message: "not a gitmoji commit".to_string(),
+        }];
+
+        // When
+        let result = Changes::sort_commits(commits, invalid.clone());
+
+        // Then
+        let expected_result = Changes {
+            major: Vec::new(),
+            minor: Vec::new(),
+            patch: Vec::new(),
+            other: Vec::new(),
+            non_conventional: invalid,
+        };
+        assert_eq!(result, expected_result);
+    }
+
+    #[test]
+    fn displaying_invalid_commits_truncates_each_to_one_line() {
+        // Given
+        let long_multiline_message = "some commit message\nbody text that should never show up";
+        let changes = Changes {
+            major: Vec::new(),
+            minor: Vec::new(),
+            patch: Vec::new(),
+            other: Vec::new(),
+            non_conventional: vec![NonConventionalCommit {
+                message: long_multiline_message.to_string(),
+            }],
+        };
+
+        // When
+        let result = changes.to_string();
+
+        // Then
+        let expected_prefix: String = long_multiline_message
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(
+            result.contains(&expected_prefix),
+            "expected a truncated single-line preview, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("body text that should never show up"),
+            "expected the commit body to not appear, got: {}",
+            result
+        );
     }
 }
 
@@ -741,6 +932,7 @@ mod evaluate_changes {
             other: vec![ConventionalCommit {
                 message: "other commit".to_string(),
             }],
+            non_conventional: Vec::new(),
         };
 
         // When
@@ -762,6 +954,7 @@ mod evaluate_changes {
             other: vec![ConventionalCommit {
                 message: "other commit".to_string(),
             }],
+            non_conventional: Vec::new(),
         };
 
         // When
@@ -785,6 +978,7 @@ mod evaluate_changes {
             other: vec![ConventionalCommit {
                 message: "other commit".to_string(),
             }],
+            non_conventional: Vec::new(),
         };
 
         // When
@@ -810,6 +1004,7 @@ mod evaluate_changes {
             other: vec![ConventionalCommit {
                 message: "other commit".to_string(),
             }],
+            non_conventional: Vec::new(),
         };
 
         // When
@@ -818,4 +1013,67 @@ mod evaluate_changes {
         // Then
         assert_eq!(result, SemanticVersion::IncrementMajor);
     }
+}
+
+#[cfg(test)]
+mod non_conventional_commit_error {
+    use crate::NonConventionalCommit;
+
+    #[test]
+    fn only_adds_an_extra_newline() {
+        // Given
+        let short_message = "short message";
+        let error = NonConventionalCommit {
+            message: short_message.to_string(),
+        };
+
+        // When
+        let result = error.truncated();
+
+        // Then
+        assert_eq!(result, format!("{}\n", short_message));
+    }
+
+    #[test]
+    fn does_not_change_anything() {
+        // Given
+        let error = NonConventionalCommit {
+            message: "single line commit message\n".to_string(),
+        };
+
+        // When
+        let result = error.truncated();
+
+        // Then
+        assert_eq!(result, "single line commit message\n");
+    }
+
+    #[test]
+    fn truncates_at_the_first_newline() {
+        // Given
+        let error = NonConventionalCommit {
+            message: "short subject\nlonger body text\n\n\n".to_string(),
+        };
+
+        // When
+        let result = error.truncated();
+
+        // Then
+        assert_eq!(result, "short subject\n");
+    }
+
+    #[test]
+    fn truncates_empty_string() {
+        // Given
+        let error = NonConventionalCommit {
+            message: "".to_string(),
+        };
+
+        // When
+        let result = error.truncated();
+
+        // Then
+        assert_eq!(result, "\n");
+    }
+
 }

@@ -9,12 +9,12 @@ fn main() {
 
     let git_repo = Repository::open(path).expect("Failed to open git repo");
 
-    let commits = get_commits(&git_repo).unwrap_or_else(|error| {
+    let (commits, discarded) = get_commits(&git_repo).unwrap_or_else(|error| {
         eprintln!("Application error: {}", error);
         process::exit(1);
     });
 
-    let changes = Changes::sort_commits(commits);
+    let changes = Changes::sort_commits(commits, discarded);
     println!("Changes in the repository:\n{}", changes);
 
     let action = evaluate_changes(changes);
